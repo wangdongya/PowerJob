@@ -1,6 +1,7 @@
 package com.github.kfcfans.powerjob.server.persistence.core.model;
 
 import lombok.Data;
+import org.hibernate.annotations.GenericGenerator;
 
 import javax.persistence.*;
 import java.util.Date;
@@ -17,7 +18,8 @@ import java.util.Date;
 public class UserInfoDO {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @GeneratedValue(strategy = GenerationType.AUTO, generator = "native")
+    @GenericGenerator(name = "native", strategy = "native")
     private Long id;
 
     private String username;
@@ -27,6 +29,11 @@ public class UserInfoDO {
     private String phone;
     // 邮箱地址
     private String email;
+    // webHook
+    private String webHook;
+
+    // 扩展字段
+    private String extra;
 
     private Date gmtCreate;
     private Date gmtModified;

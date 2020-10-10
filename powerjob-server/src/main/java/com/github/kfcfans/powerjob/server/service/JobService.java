@@ -1,6 +1,7 @@
 package com.github.kfcfans.powerjob.server.service;
 
 import com.github.kfcfans.powerjob.common.InstanceStatus;
+import com.github.kfcfans.powerjob.common.PowerJobException;
 import com.github.kfcfans.powerjob.common.TimeExpressionType;
 import com.github.kfcfans.powerjob.common.request.http.SaveJobInfoRequest;
 import com.github.kfcfans.powerjob.common.response.JobInfoDTO;
@@ -12,7 +13,7 @@ import com.github.kfcfans.powerjob.server.persistence.core.model.JobInfoDO;
 import com.github.kfcfans.powerjob.server.persistence.core.repository.InstanceInfoRepository;
 import com.github.kfcfans.powerjob.server.persistence.core.repository.JobInfoRepository;
 import com.github.kfcfans.powerjob.server.service.instance.InstanceService;
-import com.github.kfcfans.powerjob.server.service.timing.schedule.HashedWheelTimerHolder;
+import com.github.kfcfans.powerjob.server.service.instance.InstanceTimeWheelService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
@@ -22,7 +23,6 @@ import javax.annotation.Resource;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 任务服务
@@ -71,7 +71,7 @@ public class JobService {
         jobInfoDO.setStatus(request.isEnable() ? SwitchableStatus.ENABLE.getV() : SwitchableStatus.DISABLE.getV());
 
         if (jobInfoDO.getMaxWorkerCount() == null) {
-            jobInfoDO.setMaxInstanceNum(0);
+            jobInfoDO.setMaxWorkerCount(0);
         }
 
         // 转化报警用户列表
@@ -79,7 +79,7 @@ public class JobService {
             jobInfoDO.setNotifyUserIds(SJ.commaJoiner.join(request.getNotifyUserIds()));
         }
 
-        refreshJob(jobInfoDO);
+        calculateNextTriggerTime(jobInfoDO);
         if (request.getId() == null) {
             jobInfoDO.setGmtCreate(new Date());
         }
@@ -103,6 +103,8 @@ public class JobService {
      */
     public long runJob(Long jobId, String instanceParams, long delay) {
 
+        log.info("[Job-{}] try to run job, instanceParams={},delay={} ms.", jobId, instanceParams, delay);
+
         JobInfoDO jobInfo = jobInfoRepository.findById(jobId).orElseThrow(() -> new IllegalArgumentException("can't find job by id:" + jobId));
         Long instanceId = instanceService.create(jobInfo.getId(), jobInfo.getAppId(), instanceParams, null, System.currentTimeMillis() + Math.max(delay, 0));
         instanceInfoRepository.flush();
@@ -110,10 +112,11 @@ public class JobService {
         if (delay <= 0) {
             dispatchService.dispatch(jobInfo, instanceId, 0, instanceParams, null);
         }else {
-            HashedWheelTimerHolder.TIMER.schedule(() -> {
+            InstanceTimeWheelService.schedule(instanceId, delay, () -> {
                 dispatchService.dispatch(jobInfo, instanceId, 0, instanceParams, null);
-            }, delay, TimeUnit.MILLISECONDS);
+            });
         }
+        log.info("[Job-{}] run job successfully, instanceId={}", jobId, instanceId);
         return instanceId;
     }
 
@@ -141,7 +144,7 @@ public class JobService {
         JobInfoDO jobInfoDO = jobInfoRepository.findById(jobId).orElseThrow(() -> new IllegalArgumentException("can't find job by jobId:" + jobId));
 
         jobInfoDO.setStatus(SwitchableStatus.ENABLE.getV());
-        refreshJob(jobInfoDO);
+        calculateNextTriggerTime(jobInfoDO);
 
         jobInfoRepository.saveAndFlush(jobInfoDO);
     }
@@ -171,7 +174,7 @@ public class JobService {
             return;
         }
         if (executeLogs.size() > 1) {
-            log.warn("[JobService] frequent job should just have one running instance, there must have some bug.");
+            log.warn("[Job-{}] frequent job should just have one running instance, there must have some bug.", jobId);
         }
         executeLogs.forEach(instance -> {
             try {
@@ -182,7 +185,7 @@ public class JobService {
         });
     }
 
-    private void refreshJob(JobInfoDO jobInfoDO) throws Exception {
+    private void calculateNextTriggerTime(JobInfoDO jobInfoDO) throws Exception {
         // 计算下次调度时间
         Date now = new Date();
         TimeExpressionType timeExpressionType = TimeExpressionType.of(jobInfoDO.getTimeExpressionType());
@@ -190,6 +193,9 @@ public class JobService {
         if (timeExpressionType == TimeExpressionType.CRON) {
             CronExpression cronExpression = new CronExpression(jobInfoDO.getTimeExpression());
             Date nextValidTime = cronExpression.getNextValidTimeAfter(now);
+            if (nextValidTime == null) {
+                throw new PowerJobException("cron expression is out of date: " + jobInfoDO.getTimeExpression());
+            }
             jobInfoDO.setNextTriggerTime(nextValidTime.getTime());
         }else if (timeExpressionType == TimeExpressionType.API || timeExpressionType == TimeExpressionType.WORKFLOW) {
             jobInfoDO.setTimeExpression(null);

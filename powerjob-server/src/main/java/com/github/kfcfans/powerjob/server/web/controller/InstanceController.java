@@ -1,6 +1,7 @@
 package com.github.kfcfans.powerjob.server.web.controller;
 
 import com.github.kfcfans.powerjob.common.InstanceStatus;
+import com.github.kfcfans.powerjob.common.PowerJobException;
 import com.github.kfcfans.powerjob.common.response.ResultDTO;
 import com.github.kfcfans.powerjob.server.akka.OhMyServer;
 import com.github.kfcfans.powerjob.server.common.utils.OmsFileUtils;
@@ -61,6 +62,12 @@ public class InstanceController {
     @GetMapping("/stop")
     public ResultDTO<Void> stopInstance(Long instanceId) {
         instanceService.stopInstance(instanceId);
+        return ResultDTO.success(null);
+    }
+
+    @GetMapping("/retry")
+    public ResultDTO<Void> retryInstance(Long instanceId) {
+        instanceService.retryInstance(instanceId);
         return ResultDTO.success(null);
     }
 
@@ -139,10 +146,10 @@ public class InstanceController {
     private String getTargetServer(Long instanceId) {
         InstanceInfoDO instanceInfo = instanceInfoRepository.findByInstanceId(instanceId);
         if (instanceInfo == null) {
-            throw new RuntimeException("invalid instanceId: " + instanceId);
+            throw new PowerJobException("invalid instanceId: " + instanceId);
         }
 
         Optional<AppInfoDO> appInfoOpt = appInfoRepository.findById(instanceInfo.getAppId());
-        return appInfoOpt.orElseThrow(() -> new RuntimeException("impossible")).getCurrentServer();
+        return appInfoOpt.orElseThrow(() -> new PowerJobException("impossible")).getCurrentServer();
     }
 }

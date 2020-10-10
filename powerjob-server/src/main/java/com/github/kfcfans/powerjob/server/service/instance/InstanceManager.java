@@ -11,8 +11,8 @@ import com.github.kfcfans.powerjob.server.persistence.core.repository.InstanceIn
 import com.github.kfcfans.powerjob.server.service.DispatchService;
 import com.github.kfcfans.powerjob.server.service.InstanceLogService;
 import com.github.kfcfans.powerjob.server.service.UserService;
-import com.github.kfcfans.powerjob.server.service.alarm.Alarmable;
-import com.github.kfcfans.powerjob.server.service.alarm.JobInstanceAlarmContent;
+import com.github.kfcfans.powerjob.server.service.alarm.AlarmCenter;
+import com.github.kfcfans.powerjob.server.service.alarm.JobInstanceAlarm;
 import com.github.kfcfans.powerjob.server.service.timing.schedule.HashedWheelTimerHolder;
 import com.github.kfcfans.powerjob.server.service.workflow.WorkflowInstanceManager;
 import lombok.extern.slf4j.Slf4j;
@@ -38,8 +38,6 @@ public class InstanceManager {
     private DispatchService dispatchService;
     @Resource
     private InstanceLogService instanceLogService;
-    @Resource(name = "omsCenterAlarmService")
-    private Alarmable omsCenterAlarmService;
     @Resource
     private InstanceMetadataService instanceMetadataService;
     @Resource
@@ -107,7 +105,7 @@ public class InstanceManager {
                 log.info("[InstanceManager-{}] instance execute failed but will take the {}th retry.", instanceId, instanceInfo.getRunningTimes());
 
                 // 延迟10S重试（由于重试不改变 instanceId，如果派发到同一台机器，上一个 TaskTracker 还处于资源释放阶段，无法创建新的TaskTracker，任务失败）
-                HashedWheelTimerHolder.TIMER.schedule(() -> {
+                HashedWheelTimerHolder.INACCURATE_TIMER.schedule(() -> {
                     dispatchService.redispatch(jobInfo, instanceId, instanceInfo.getRunningTimes());
                 }, 10, TimeUnit.SECONDS);
 
@@ -162,12 +160,12 @@ public class InstanceManager {
             }
 
             InstanceInfoDO instanceInfo = instanceInfoRepository.findByInstanceId(instanceId);
-            JobInstanceAlarmContent content = new JobInstanceAlarmContent();
+            JobInstanceAlarm content = new JobInstanceAlarm();
             BeanUtils.copyProperties(jobInfo, content);
             BeanUtils.copyProperties(instanceInfo, content);
 
             List<UserInfoDO> userList = SpringUtils.getBean(UserService.class).fetchNotifyUserList(jobInfo.getNotifyUserIds());
-            omsCenterAlarmService.onJobInstanceFailed(content, userList);
+            AlarmCenter.alarmFailed(content, userList);
         }
 
         // 主动移除缓存，减小内存占用

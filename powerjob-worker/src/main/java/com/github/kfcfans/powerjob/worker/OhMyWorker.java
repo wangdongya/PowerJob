@@ -5,16 +5,16 @@ import akka.actor.ActorSystem;
 import akka.actor.DeadLetter;
 import akka.actor.Props;
 import akka.routing.RoundRobinPool;
-import com.github.kfcfans.powerjob.common.OmsException;
+import com.github.kfcfans.powerjob.common.PowerJobException;
 import com.github.kfcfans.powerjob.common.RemoteConstant;
 import com.github.kfcfans.powerjob.common.response.ResultDTO;
 import com.github.kfcfans.powerjob.common.utils.CommonUtils;
 import com.github.kfcfans.powerjob.common.utils.HttpUtils;
 import com.github.kfcfans.powerjob.common.utils.JsonUtils;
 import com.github.kfcfans.powerjob.common.utils.NetUtils;
-import com.github.kfcfans.powerjob.worker.actors.TroubleshootingActor;
 import com.github.kfcfans.powerjob.worker.actors.ProcessorTrackerActor;
 import com.github.kfcfans.powerjob.worker.actors.TaskTrackerActor;
+import com.github.kfcfans.powerjob.worker.actors.TroubleshootingActor;
 import com.github.kfcfans.powerjob.worker.actors.WorkerActor;
 import com.github.kfcfans.powerjob.worker.background.OmsLogHandler;
 import com.github.kfcfans.powerjob.worker.background.ServerDiscoveryService;
@@ -163,16 +163,16 @@ public class OhMyWorker implements ApplicationContextAware, InitializingBean, Di
                     return appId;
                 }else {
                     log.error("[OhMyWorker] assert appName failed, this appName is invalid, please register the appName {} first.", appName);
-                    throw new OmsException(resultDTO.getMessage());
+                    throw new PowerJobException(resultDTO.getMessage());
                 }
-            }catch (OmsException oe) {
+            }catch (PowerJobException oe) {
                 throw oe;
             }catch (Exception ignore) {
                 log.warn("[OhMyWorker] assert appName by url({}) failed, please check the server address.", realUrl);
             }
         }
         log.error("[OhMyWorker] no available server in {}.", config.getServerAddress());
-        throw new OmsException("no server available!");
+        throw new PowerJobException("no server available!");
     }
 
     @Override

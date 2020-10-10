@@ -1,10 +1,12 @@
 package com.github.kfcfans.powerjob.server.test;
 
+import com.github.kfcfans.powerjob.server.OhMyApplication;
 import com.github.kfcfans.powerjob.server.common.utils.CronExpression;
 import com.github.kfcfans.powerjob.server.common.utils.timewheel.HashedWheelTimer;
 import com.github.kfcfans.powerjob.server.common.utils.timewheel.TimerFuture;
 import com.github.kfcfans.powerjob.server.common.utils.timewheel.TimerTask;
 import com.google.common.collect.Lists;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.Test;
 
 import java.util.Date;
@@ -81,5 +83,13 @@ public class UtilsTest {
     @Test
     public void testTZ() {
         System.out.println(TimeZone.getDefault());
+    }
+
+    @Test
+    public void testStringUtils() {
+        String goodAppName = "powerjob-server";
+        String appName = "powerjob-server ";
+        System.out.println(StringUtils.containsWhitespace(goodAppName));
+        System.out.println(StringUtils.containsWhitespace(appName));
     }
 }

@@ -3,6 +3,7 @@ package com.github.kfcfans.powerjob.server.service.instance;
 import akka.actor.ActorSelection;
 import akka.pattern.Patterns;
 import com.github.kfcfans.powerjob.common.InstanceStatus;
+import com.github.kfcfans.powerjob.common.PowerJobException;
 import com.github.kfcfans.powerjob.common.RemoteConstant;
 import com.github.kfcfans.powerjob.common.SystemInstanceResult;
 import com.github.kfcfans.powerjob.common.model.InstanceDetail;
@@ -12,8 +13,12 @@ import com.github.kfcfans.powerjob.common.response.AskResponse;
 import com.github.kfcfans.powerjob.common.response.InstanceInfoDTO;
 import com.github.kfcfans.powerjob.server.akka.OhMyServer;
 import com.github.kfcfans.powerjob.server.common.constans.InstanceType;
+import com.github.kfcfans.powerjob.server.common.utils.timewheel.TimerFuture;
 import com.github.kfcfans.powerjob.server.persistence.core.model.InstanceInfoDO;
+import com.github.kfcfans.powerjob.server.persistence.core.model.JobInfoDO;
 import com.github.kfcfans.powerjob.server.persistence.core.repository.InstanceInfoRepository;
+import com.github.kfcfans.powerjob.server.persistence.core.repository.JobInfoRepository;
+import com.github.kfcfans.powerjob.server.service.DispatchService;
 import com.github.kfcfans.powerjob.server.service.id.IdGenerateService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -39,9 +44,13 @@ import static com.github.kfcfans.powerjob.common.InstanceStatus.STOPPED;
 public class InstanceService {
 
     @Resource
+    private DispatchService dispatchService;
+    @Resource
     private IdGenerateService idGenerateService;
     @Resource
     private InstanceManager instanceManager;
+    @Resource
+    private JobInfoRepository jobInfoRepository;
     @Resource
     private InstanceInfoRepository instanceInfoRepository;
 
@@ -86,12 +95,7 @@ public class InstanceService {
         log.info("[Instance-{}] try to stop the instance.", instanceId);
         try {
 
-            InstanceInfoDO instanceInfo = instanceInfoRepository.findByInstanceId(instanceId);
-            if (instanceInfo == null) {
-                log.warn("[Instance-{}] can't find instanceInfo by instanceId.", instanceId);
-                throw new IllegalArgumentException("invalid instanceId: " + instanceId);
-            }
-
+            InstanceInfoDO instanceInfo = fetchInstanceInfo(instanceId);
             // 判断状态，只有运行中才能停止
             if (!InstanceStatus.generalizedRunningStatus.contains(instanceInfo.getStatus())) {
                 throw new IllegalArgumentException("can't stop finished instance!");
@@ -125,16 +129,80 @@ public class InstanceService {
     }
 
     /**
+     * 重试任务（只有结束的任务运行重试）
+     * @param instanceId 任务实例ID
+     */
+    public void retryInstance(Long instanceId) {
+        InstanceInfoDO instanceInfo = fetchInstanceInfo(instanceId);
+        if (!InstanceStatus.finishedStatus.contains(instanceInfo.getStatus())) {
+            throw new PowerJobException("Only stopped instance can be retry!");
+        }
+        // 暂时不支持工作流任务的重试
+        if (instanceInfo.getWfInstanceId() != null) {
+            throw new PowerJobException("Workflow's instance do not support retry!");
+        }
+
+        instanceInfo.setStatus(InstanceStatus.WAITING_DISPATCH.getV());
+        instanceInfo.setExpectedTriggerTime(System.currentTimeMillis());
+        instanceInfo.setFinishedTime(null);
+        instanceInfo.setActualTriggerTime(null);
+        instanceInfo.setTaskTrackerAddress(null);
+        instanceInfo.setResult(null);
+        instanceInfoRepository.saveAndFlush(instanceInfo);
+
+        // 派发任务
+        Long jobId = instanceInfo.getJobId();
+        JobInfoDO jobInfo = jobInfoRepository.findById(jobId).orElseThrow(() -> new PowerJobException("can't find job info by jobId: " + jobId));
+        dispatchService.redispatch(jobInfo, instanceId, instanceInfo.getRunningTimes());
+    }
+
+    /**
+     * 取消任务实例的运行
+     * 接口使用条件：调用接口时间与待取消任务的预计执行时间有一定时间间隔，否则不保证可靠性！
+     * @param instanceId 任务实例
+     */
+    public void cancelInstance(Long instanceId) {
+        log.info("[Instance-{}] try to cancel the instance.", instanceId);
+
+        try {
+            InstanceInfoDO instanceInfo = fetchInstanceInfo(instanceId);
+            TimerFuture timerFuture = InstanceTimeWheelService.fetchTimerFuture(instanceId);
+
+            boolean success;
+            // 本机时间轮中存在该任务且顺利取消，抢救成功！
+            if (timerFuture != null) {
+                success = timerFuture.cancel();
+            } else {
+                // 调用该接口时间和预计调度时间相近时，理论上会出现问题，cancel 状态还没写进去另一边就完成了 dispatch，随后状态会被覆盖
+                // 解决该问题的成本极高（分布式锁），因此选择不解决
+                // 该接口使用条件：调用接口时间与待取消任务的预计执行时间有一定时间间隔，否则不保证可靠性
+                success = InstanceStatus.WAITING_DISPATCH.getV() == instanceInfo.getStatus();
+            }
+
+            if (success) {
+                instanceInfo.setStatus(InstanceStatus.CANCELED.getV());
+                instanceInfo.setResult(SystemInstanceResult.CANCELED_BY_USER);
+                // 如果写 DB 失败，抛异常，接口返回 false，即取消失败，任务会被 HA 机制重新调度执行，因此此处不需要任何处理
+                instanceInfoRepository.saveAndFlush(instanceInfo);
+                log.info("[Instance-{}] cancel the instance successfully.", instanceId);
+            }else {
+                log.warn("[Instance-{}] cancel the instance failed.", instanceId);
+                throw new PowerJobException("instance already up and running");
+            }
+
+        }catch (Exception e) {
+            log.error("[Instance-{}] cancelInstance failed.", instanceId, e);
+            throw e;
+        }
+    }
+
+    /**
      * 获取任务实例的信息
      * @param instanceId 任务实例ID
      * @return 任务实例的信息
      */
     public InstanceInfoDTO getInstanceInfo(Long instanceId) {
-        InstanceInfoDO instanceInfoDO = instanceInfoRepository.findByInstanceId(instanceId);
-        if (instanceInfoDO == null) {
-            log.warn("[Instance-{}] can't find InstanceInfo by instanceId.", instanceId);
-            throw new IllegalArgumentException("invalid instanceId: " + instanceId);
-        }
+        InstanceInfoDO instanceInfoDO = fetchInstanceInfo(instanceId);
         InstanceInfoDTO instanceInfoDTO = new InstanceInfoDTO();
         BeanUtils.copyProperties(instanceInfoDO, instanceInfoDTO);
         return instanceInfoDTO;
@@ -146,11 +214,7 @@ public class InstanceService {
      * @return 任务实例的状态
      */
     public InstanceStatus getInstanceStatus(Long instanceId) {
-        InstanceInfoDO instanceInfoDO = instanceInfoRepository.findByInstanceId(instanceId);
-        if (instanceInfoDO == null) {
-            log.warn("[Instance-{}] can't find InstanceInfo by instanceId.", instanceId);
-            throw new IllegalArgumentException("invalid instanceId: " + instanceId);
-        }
+        InstanceInfoDO instanceInfoDO = fetchInstanceInfo(instanceId);
         return InstanceStatus.of(instanceInfoDO.getStatus());
     }
 
@@ -161,11 +225,7 @@ public class InstanceService {
      */
     public InstanceDetail getInstanceDetail(Long instanceId) {
 
-        InstanceInfoDO instanceInfoDO = instanceInfoRepository.findByInstanceId(instanceId);
-        if (instanceInfoDO == null) {
-            log.warn("[Instance-{}] can't find InstanceInfo by instanceId", instanceId);
-            throw new IllegalArgumentException("invalid instanceId: " + instanceId);
-        }
+        InstanceInfoDO instanceInfoDO = fetchInstanceInfo(instanceId);
 
         InstanceStatus instanceStatus = InstanceStatus.of(instanceInfoDO.getStatus());
 
@@ -202,4 +262,12 @@ public class InstanceService {
         return detail;
     }
 
+    private InstanceInfoDO fetchInstanceInfo(Long instanceId) {
+        InstanceInfoDO instanceInfoDO = instanceInfoRepository.findByInstanceId(instanceId);
+        if (instanceInfoDO == null) {
+            log.warn("[Instance-{}] can't find InstanceInfo by instanceId", instanceId);
+            throw new IllegalArgumentException("invalid instanceId: " + instanceId);
+        }
+        return instanceInfoDO;
+    }
 }

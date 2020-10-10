@@ -16,12 +16,12 @@ import com.github.kfcfans.powerjob.server.service.DispatchService;
 import com.github.kfcfans.powerjob.server.service.JobService;
 import com.github.kfcfans.powerjob.server.service.ha.WorkerManagerService;
 import com.github.kfcfans.powerjob.server.service.instance.InstanceService;
+import com.github.kfcfans.powerjob.server.service.instance.InstanceTimeWheelService;
 import com.github.kfcfans.powerjob.server.service.workflow.WorkflowInstanceManager;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.scheduling.annotation.Async;
@@ -34,7 +34,6 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -122,8 +121,6 @@ public class OmsScheduleService {
      */
     private void scheduleCronJob(List<Long> appIds) {
 
-
-        Date now = new Date();
         long nowTime = System.currentTimeMillis();
         long timeThreshold = nowTime + 2 * SCHEDULE_RATE;
         Lists.partition(appIds, MAX_APP_NUM).forEach(partAppIds -> {
@@ -160,30 +157,19 @@ public class OmsScheduleService {
                         delay = targetTriggerTime - nowTime;
                     }
 
-                    HashedWheelTimerHolder.TIMER.schedule(() -> {
+                    InstanceTimeWheelService.schedule(instanceId, delay, () -> {
                         dispatchService.dispatch(jobInfoDO, instanceId, 0, null, null);
-                    }, delay, TimeUnit.MILLISECONDS);
+                    });
                 });
 
                 // 3. 计算下一次调度时间（忽略5S内的重复执行，即CRON模式下最小的连续执行间隔为 SCHEDULE_RATE ms）
-                List<JobInfoDO> updatedJobInfos = Lists.newLinkedList();
                 jobInfos.forEach(jobInfoDO -> {
-
                     try {
-
-                        Date nextTriggerTime = calculateNextTriggerTime(jobInfoDO.getNextTriggerTime(), jobInfoDO.getTimeExpression());
-
-                        JobInfoDO updatedJobInfo = new JobInfoDO();
-                        BeanUtils.copyProperties(jobInfoDO, updatedJobInfo);
-                        updatedJobInfo.setNextTriggerTime(nextTriggerTime.getTime());
-                        updatedJobInfo.setGmtModified(now);
-
-                        updatedJobInfos.add(updatedJobInfo);
+                        refreshJob(jobInfoDO);
                     } catch (Exception e) {
-                        log.error("[Job-{}] calculate next trigger time failed.", jobInfoDO.getId(), e);
+                        log.error("[Job-{}] refresh job failed.", jobInfoDO.getId(), e);
                     }
                 });
-                jobInfoRepository.saveAll(updatedJobInfos);
                 jobInfoRepository.flush();
 
 
@@ -204,11 +190,10 @@ public class OmsScheduleService {
                 return;
             }
 
-            Date now = new Date();
             wfInfos.forEach(wfInfo -> {
 
                 // 1. 先生成调度记录，防止不调度的情况发生
-                Long wfInstanceId = workflowInstanceManager.create(wfInfo);
+                Long wfInstanceId = workflowInstanceManager.create(wfInfo, null);
 
                 // 2. 推入时间轮，准备调度执行
                 long delay = wfInfo.getNextTriggerTime() - System.currentTimeMillis();
@@ -216,20 +201,13 @@ public class OmsScheduleService {
                     log.warn("[Workflow-{}] workflow schedule delay, expect:{}, actual: {}", wfInfo.getId(), wfInfo.getNextTriggerTime(), System.currentTimeMillis());
                     delay = 0;
                 }
-                HashedWheelTimerHolder.TIMER.schedule(() -> workflowInstanceManager.start(wfInfo, wfInstanceId), delay, TimeUnit.MILLISECONDS);
+                InstanceTimeWheelService.schedule(wfInstanceId, delay, () -> workflowInstanceManager.start(wfInfo, wfInstanceId, null));
 
                 // 3. 重新计算下一次调度时间并更新
                 try {
-                    Date nextTriggerTime = calculateNextTriggerTime(wfInfo.getNextTriggerTime(), wfInfo.getTimeExpression());
-
-                    WorkflowInfoDO updateEntity = new WorkflowInfoDO();
-                    BeanUtils.copyProperties(wfInfo, updateEntity);
-
-                    updateEntity.setNextTriggerTime(nextTriggerTime.getTime());
-                    updateEntity.setGmtModified(now);
-                    workflowInfoRepository.save(updateEntity);
+                    refreshWorkflow(wfInfo);
                 }catch (Exception e) {
-                    log.error("[Workflow-{}] parse cron failed.", wfInfo.getId(), e);
+                    log.error("[Workflow-{}] refresh workflow failed.", wfInfo.getId(), e);
                 }
             });
             workflowInfoRepository.flush();
@@ -263,6 +241,40 @@ public class OmsScheduleService {
                 log.error("[FrequentScheduler] schedule frequent job failed.", e);
             }
         });
+    }
+
+    private void refreshJob(JobInfoDO jobInfo) throws Exception {
+        Date nextTriggerTime = calculateNextTriggerTime(jobInfo.getNextTriggerTime(), jobInfo.getTimeExpression());
+
+        JobInfoDO updatedJobInfo = new JobInfoDO();
+        BeanUtils.copyProperties(jobInfo, updatedJobInfo);
+
+        if (nextTriggerTime == null) {
+            log.warn("[Job-{}] this job won't be scheduled anymore, system will set the status to DISABLE!", jobInfo.getId());
+            updatedJobInfo.setStatus(SwitchableStatus.DISABLE.getV());
+        }else {
+            updatedJobInfo.setNextTriggerTime(nextTriggerTime.getTime());
+        }
+        updatedJobInfo.setGmtModified(new Date());
+
+        jobInfoRepository.save(updatedJobInfo);
+    }
+
+    private void refreshWorkflow(WorkflowInfoDO wfInfo) throws Exception {
+        Date nextTriggerTime = calculateNextTriggerTime(wfInfo.getNextTriggerTime(), wfInfo.getTimeExpression());
+
+        WorkflowInfoDO updateEntity = new WorkflowInfoDO();
+        BeanUtils.copyProperties(wfInfo, updateEntity);
+
+        if (nextTriggerTime == null) {
+            log.warn("[Workflow-{}] this workflow won't be scheduled anymore, system will set the status to DISABLE!", wfInfo.getId());
+            wfInfo.setStatus(SwitchableStatus.DISABLE.getV());
+        }else {
+            updateEntity.setNextTriggerTime(nextTriggerTime.getTime());
+        }
+
+        updateEntity.setGmtModified(new Date());
+        workflowInfoRepository.save(updateEntity);
     }
 
     /**

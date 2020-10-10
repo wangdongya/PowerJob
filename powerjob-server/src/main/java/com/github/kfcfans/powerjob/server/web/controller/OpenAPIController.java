@@ -94,6 +94,20 @@ public class OpenAPIController {
         return ResultDTO.success(null);
     }
 
+    @PostMapping(OpenAPIConstant.CANCEL_INSTANCE)
+    public ResultDTO<Void> cancelInstance(Long instanceId, Long appId) {
+        checkInstanceIdValid(instanceId, appId);
+        instanceService.cancelInstance(instanceId);
+        return ResultDTO.success(null);
+    }
+
+    @PostMapping(OpenAPIConstant.RETRY_INSTANCE)
+    public ResultDTO<Void> retryInstance(Long instanceId, Long appId) {
+        checkInstanceIdValid(instanceId, appId);
+        instanceService.retryInstance(instanceId);
+        return ResultDTO.success(null);
+    }
+
     @PostMapping(OpenAPIConstant.FETCH_INSTANCE_STATUS)
     public ResultDTO<Integer> fetchInstanceStatus(Long instanceId) {
         InstanceStatus instanceStatus = instanceService.getInstanceStatus(instanceId);
@@ -136,8 +150,8 @@ public class OpenAPIController {
     }
 
     @PostMapping(OpenAPIConstant.RUN_WORKFLOW)
-    public ResultDTO<Long> runWorkflow(Long workflowId, Long appId) {
-        return ResultDTO.success(workflowService.runWorkflow(workflowId, appId));
+    public ResultDTO<Long> runWorkflow(Long workflowId, Long appId, @RequestParam(required = false) String initParams, @RequestParam(required = false) Long delay) {
+        return ResultDTO.success(workflowService.runWorkflow(workflowId, appId, initParams, delay == null ? 0 : delay));
     }
 
     /* ************* Workflow Instance 区 ************* */

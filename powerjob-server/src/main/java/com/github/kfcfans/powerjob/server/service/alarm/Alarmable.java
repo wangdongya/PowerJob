@@ -1,6 +1,7 @@
 package com.github.kfcfans.powerjob.server.service.alarm;
 
 import com.github.kfcfans.powerjob.server.persistence.core.model.UserInfoDO;
+import org.springframework.beans.factory.InitializingBean;
 
 import java.util.List;
 
@@ -10,19 +11,12 @@ import java.util.List;
  * @author tjq
  * @since 2020/4/19
  */
-public interface Alarmable {
+public interface Alarmable extends InitializingBean {
 
-    /**
-     * 任务执行失败报警
-     * @param content 任务实例相关信息
-     * @param targetUserList 目标用户列表
-     */
-    void onJobInstanceFailed(JobInstanceAlarmContent content, List<UserInfoDO> targetUserList);
+    void onFailed(Alarm alarm, List<UserInfoDO> targetUserList);
 
-    /**
-     * 工作流执行失败报警
-     * @param content 工作流实例相关信息
-     * @param targetUserList 目标用户列表
-     */
-    void onWorkflowInstanceFailed(WorkflowInstanceAlarmContent content, List<UserInfoDO> targetUserList);
+    @Override
+    default void afterPropertiesSet() throws Exception {
+        AlarmCenter.register(this);
+    }
 }
